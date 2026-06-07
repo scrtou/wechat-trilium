@@ -1,0 +1,18 @@
+[Unit]
+Description=WeChat to TriliumNext bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vps
+Group=vps
+WorkingDirectory=/home/vps/code/wechat
+EnvironmentFile=/home/vps/code/wechat/.env
+ExecStart=/home/vps/code/wechat/.venv/bin/gunicorn --workers 1 --threads 4 --bind 127.0.0.1:8000 app:app
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
