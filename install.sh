@@ -249,7 +249,7 @@ Group=$RUN_GROUP
 WorkingDirectory=$APP_DIR
 Environment=APP_DIR=$APP_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=/bin/bash -lc 'exec "\$APP_DIR/.venv/bin/gunicorn" --workers "\${GUNICORN_WORKERS:-1}" --threads "\${GUNICORN_THREADS:-4}" --bind "\${BIND_HOST:-127.0.0.1}:\${PORT:-8000}" app:app'
+ExecStart=/bin/bash -lc 'exec "\$APP_DIR/.venv/bin/gunicorn" --workers "\${GUNICORN_WORKERS:-1}" --threads "\${GUNICORN_THREADS:-4}" --bind "\${BIND_HOST:-127.0.0.1}:\${PORT:-8000}" --access-logfile - --error-logfile - --capture-output --log-level info app:app'
 Restart=always
 RestartSec=5
 TimeoutStopSec=30

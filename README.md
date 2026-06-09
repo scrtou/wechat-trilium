@@ -141,3 +141,21 @@ curl -4 ifconfig.me
 ## 7. 安全注意
 
 不要提交 `.env` 到 Git。仓库里的 `.gitignore` 已经忽略 `.env`、`.venv` 等本地文件。
+
+## 8. systemd 日志里看不到 GET/POST 请求
+
+手动运行 `python app.py` 使用 Flask 开发服务器，会默认打印访问日志。systemd 服务使用 gunicorn，必须开启 access log 才会在 journal 里看到 GET/POST。
+
+当前 `install.sh` 已默认加入：
+
+```text
+--access-logfile - --error-logfile - --capture-output --log-level info
+```
+
+更新后执行：
+
+```bash
+git pull
+./install.sh --use-existing-env
+sudo journalctl -u wechat-trilium -f
+```
