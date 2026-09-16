@@ -35,6 +35,7 @@ OWNER_OPENIDS = {
 }
 PROCESS_OWNER_ONLY = os.getenv("PROCESS_OWNER_ONLY", "true").lower() in {"1", "true", "yes", "on"}
 REPLY_TO_OWNER = os.getenv("REPLY_TO_OWNER", "false").lower() in {"1", "true", "yes", "on"}
+SHOW_MESSAGE_METADATA = os.getenv("SHOW_MESSAGE_METADATA", "false").lower() in {"1", "true", "yes", "on"}
 
 # 简单内存去重；生产多进程/多机器建议换 Redis/数据库。
 _seen_msg_ids = {}
@@ -398,7 +399,28 @@ def download_wechat_media(media_id: str, fallback_url: str = "", suggested_name:
     raise RuntimeError("; ".join(errors) or "没有可下载的媒体地址")
 
 
-def metadata_html(message: dict) -> str:
+def compact_text(value: str, limit: int = 32) -> str:
+    """
+    把消息内容压成适合 Note 标题的一行短文本。
+    """
+    value = " ".join((value or "").split())
+    if len(value) <= limit:
+        return value
+    return value[:limit - 1].rstrip() + "…"
+
+
+def message_footer_html(message: dict, dt: datetime) -> str:
+    """
+    默认只显示简洁来源信息。
+    SHOW_MESSAGE_METADATA=true 时，额外显示技术字段，便于排查问题。
+    """
+    footer = (
+        f'<p><small>来自微信 · {html.escape(dt.strftime("%H:%M:%S"))}</small></p>'
+    )
+
+    if not SHOW_MESSAGE_METADATA:
+        return footer
+
     items = [
         ("FromUserName", message.get("FromUserName", "")),
         ("ToUserName", message.get("ToUserName", "")),
@@ -407,27 +429,60 @@ def metadata_html(message: dict) -> str:
         ("MsgId", message.get("MsgId", "")),
         ("MediaId", message.get("MediaId", "")),
     ]
-    lines = "\n".join(
-        f"<li><strong>{html.escape(k)}:</strong> {html.escape(v)}</li>"
+
+    rows = "".join(
+        "<tr>"
+        f"<td><strong>{html.escape(k)}</strong></td>"
+        f"<td>{html.escape(v)}</td>"
+        "</tr>"
         for k, v in items
         if v
     )
-    return f"<ul>{lines}</ul>"
+
+    if not rows:
+        return footer
+
+    return (
+        f"{footer}"
+        "<hr>"
+        "<p><small><strong>消息信息</strong></small></p>"
+        f"<table><tbody>{rows}</tbody></table>"
+    )
+
+
+def text_content_html(content: str, message: dict, dt: datetime) -> str:
+    """
+    文本消息采用普通段落显示，不再使用 <pre>，阅读体验更接近日记。
+    """
+    escaped = html.escape(content or "")
+    body = escaped.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
+    if not body:
+        body = "<em>空文本消息</em>"
+
+    return (
+        f"<p>{body}</p>"
+        "<hr>"
+        f"{message_footer_html(message, dt)}"
+    )
 
 
 def save_text_message(message: dict, parent_note_id: str, dt: datetime) -> None:
-    title = f"文本 - {dt.strftime('%H:%M:%S')}"
     content = message.get("Content", "")
-    content_html = f"""
-<h1>{html.escape(title)}</h1>
-{metadata_html(message)}
-<pre>{html.escape(content)}</pre>
-""".strip()
-    create_text_note(parent_note_id, title, content_html)
+    preview = compact_text(content)
+
+    if preview:
+        title = f"微信 · 💬 {dt.strftime('%H:%M')} · {preview}"
+    else:
+        title = f"微信 · 💬 {dt.strftime('%H:%M')} · 文本"
+
+    create_text_note(
+        parent_note_id,
+        title,
+        text_content_html(content, message, dt),
+    )
 
 
 def save_image_message(message: dict, parent_note_id: str, dt: datetime) -> None:
-    title = f"图片 - {dt.strftime('%H:%M:%S')}"
     msg_id = message.get("MsgId") or str(int(time.time()))
     data, mime, filename = download_wechat_media(
         media_id=message.get("MediaId", ""),
@@ -436,7 +491,10 @@ def save_image_message(message: dict, parent_note_id: str, dt: datetime) -> None
         fallback_ext=".jpg",
         mime_hint="image/jpeg",
     )
-    create_binary_note(parent_note_id, f"{title} - {filename}", "image", mime, data)
+
+    # 图片 Note 本身就是图片，不再把原始文件名堆进标题。
+    title = f"微信 · 🖼️ {dt.strftime('%H:%M')} · 图片"
+    create_binary_note(parent_note_id, title, "image", mime, data)
 
 
 def save_voice_message(message: dict, parent_note_id: str, dt: datetime) -> None:
@@ -447,9 +505,11 @@ def save_voice_message(message: dict, parent_note_id: str, dt: datetime) -> None
         "silk": "audio/silk",
         "mp3": "audio/mpeg",
     }
+
     mime_hint = mime_map.get(fmt, "application/octet-stream")
     ext = f".{fmt}" if fmt else ".amr"
     msg_id = message.get("MsgId") or str(int(time.time()))
+
     data, mime, filename = download_wechat_media(
         media_id=message.get("MediaId", ""),
         suggested_name=f"wechat_voice_{msg_id}",
@@ -457,32 +517,65 @@ def save_voice_message(message: dict, parent_note_id: str, dt: datetime) -> None
         mime_hint=mime_hint,
     )
 
-    recognition = message.get("Recognition", "")
-    title = f"语音 - {dt.strftime('%H:%M:%S')}"
-    if recognition:
-        title = f"{title} - {recognition[:24]}"
+    recognition = (message.get("Recognition") or "").strip()
+    preview = compact_text(recognition, 28)
 
-    content_html = f"""
-<h1>{html.escape(title)}</h1>
-{metadata_html(message)}
-<p><strong>格式:</strong> {html.escape(fmt)}</p>
-<p><strong>语音识别:</strong> {html.escape(recognition or "无")}</p>
-<p>音频文件已作为附件保存：{html.escape(filename)}</p>
-""".strip()
+    if preview:
+        title = f"微信 · 🎙️ {dt.strftime('%H:%M')} · {preview}"
+    else:
+        title = f"微信 · 🎙️ {dt.strftime('%H:%M')} · 语音"
+
+    if recognition:
+        body = (
+            f"<p>{html.escape(recognition)}</p>"
+            f"<p><small>语音原文件：{html.escape(filename)}</small></p>"
+        )
+    else:
+        body = (
+            "<p><em>这条语音没有识别文字。</em></p>"
+            f"<p><small>语音原文件：{html.escape(filename)}</small></p>"
+        )
+
+    content_html = (
+        body
+        + "<hr>"
+        + message_footer_html(message, dt)
+    )
+
     note = create_text_note(parent_note_id, title, content_html)
     create_attachment(note["note"]["noteId"], filename, "file", mime, data)
 
 
 def save_fallback_message(message: dict, parent_note_id: str, dt: datetime, reason: str = "") -> None:
     msg_type = message.get("MsgType", "unknown")
-    title = f"{msg_type} - {dt.strftime('%H:%M:%S')}"
-    content_html = f"""
-<h1>{html.escape(title)}</h1>
-{metadata_html(message)}
-{f"<p><strong>保存提示:</strong> {html.escape(reason)}</p>" if reason else ""}
-<pre>{html.escape(str(message))}</pre>
-""".strip()
-    create_text_note(parent_note_id, title, content_html)
+    title = f"微信 · 📩 {dt.strftime('%H:%M')} · {msg_type}"
+
+    visible_items = []
+    for key, value in message.items():
+        if key in {"FromUserName", "ToUserName", "CreateTime", "MsgId", "MediaId"}:
+            continue
+        if value:
+            visible_items.append(
+                f"<li><strong>{html.escape(str(key))}:</strong> "
+                f"{html.escape(str(value))}</li>"
+            )
+
+    content_parts = []
+    if reason:
+        content_parts.append(
+            f"<p><em>{html.escape(reason)}</em></p>"
+        )
+    if visible_items:
+        content_parts.append("<ul>" + "".join(visible_items) + "</ul>")
+
+    content_parts.append("<hr>")
+    content_parts.append(message_footer_html(message, dt))
+
+    create_text_note(
+        parent_note_id,
+        title,
+        "".join(content_parts),
+    )
 
 
 def save_wechat_message(message: dict) -> None:
