@@ -26,6 +26,7 @@ WECHAT_APP_SECRET = os.getenv("WECHAT_APP_SECRET", "")
 TRILIUM_BASE_URL = os.getenv("TRILIUM_BASE_URL", "").rstrip("/")
 TRILIUM_ETAPI_TOKEN = os.getenv("TRILIUM_ETAPI_TOKEN", "")
 TRILIUM_PARENT_NOTE_ID = os.getenv("TRILIUM_PARENT_NOTE_ID", "")
+TRILIUM_TARGET_MODE = os.getenv("TRILIUM_TARGET_MODE", "note").strip().lower()
 ARCHIVE_TIMEZONE = os.getenv("ARCHIVE_TIMEZONE", "Asia/Shanghai")
 OWNER_OPENIDS = {
     item.strip()
@@ -46,6 +47,19 @@ try:
     _archive_tz = ZoneInfo(ARCHIVE_TIMEZONE)
 except Exception:
     _archive_tz = timezone.utc
+
+
+VALID_TRILIUM_TARGET_MODES = {"note", "journal"}
+
+if TRILIUM_TARGET_MODE not in VALID_TRILIUM_TARGET_MODES:
+    raise RuntimeError(
+        "TRILIUM_TARGET_MODE must be 'note' or 'journal'"
+    )
+
+if TRILIUM_TARGET_MODE == "note" and not TRILIUM_PARENT_NOTE_ID:
+    raise RuntimeError(
+        "TRILIUM_PARENT_NOTE_ID is required when TRILIUM_TARGET_MODE=note"
+    )
 
 
 def verify_wechat_signature(signature: str, timestamp: str, nonce: str) -> bool:
@@ -247,6 +261,10 @@ def create_attachment(owner_id: str, title: str, role: str, mime: str, data: byt
 
 
 def get_day_parent_note_id(dt: datetime) -> str:
+    """
+    note 模式：
+    在 TRILIUM_PARENT_NOTE_ID 下按日期创建/复用归档节点。
+    """
     day = dt.strftime("%Y-%m-%d")
     digest = hashlib.sha1(f"{TRILIUM_PARENT_NOTE_ID}:{day}".encode("utf-8")).hexdigest()[:16]
     day_note_id = f"wx{digest}"
@@ -259,6 +277,39 @@ def get_day_parent_note_id(dt: datetime) -> str:
         is_expanded=True,
     )
     return day_note_id
+
+
+def get_journal_day_note_id(dt: datetime) -> str:
+    """
+    journal 模式：
+    获取 Trilium 指定日期的 Day Note。
+    如果当天日记不存在，Trilium 会按 Calendar/Journal 机制创建它。
+    """
+    day = dt.strftime("%Y-%m-%d")
+    resp = trilium_request("GET", f"/calendar/days/{day}")
+    data = resp.json()
+
+    note_id = data.get("noteId")
+    if not note_id:
+        raise RuntimeError(f"Trilium Journal Day Note 返回异常：{data}")
+
+    return note_id
+
+
+def get_target_parent_note_id(dt: datetime) -> str:
+    """
+    根据 TRILIUM_TARGET_MODE 二选一决定消息最终保存位置：
+
+    note:
+        TRILIUM_PARENT_NOTE_ID / YYYY-MM-DD / 消息
+
+    journal:
+        Trilium Journal / 当天 Day Note / 消息
+    """
+    if TRILIUM_TARGET_MODE == "journal":
+        return get_journal_day_note_id(dt)
+
+    return get_day_parent_note_id(dt)
 
 
 def guess_extension(mime: str, fallback: str) -> str:
@@ -437,9 +488,9 @@ def save_fallback_message(message: dict, parent_note_id: str, dt: datetime, reas
 def save_wechat_message(message: dict) -> None:
     msg_type = message.get("MsgType", "unknown")
     dt = get_message_datetime(message)
-    parent_note_id = get_day_parent_note_id(dt)
 
     try:
+        parent_note_id = get_target_parent_note_id(dt)
         if msg_type == "text":
             save_text_message(message, parent_note_id, dt)
         elif msg_type == "image":
@@ -450,8 +501,14 @@ def save_wechat_message(message: dict) -> None:
             save_fallback_message(message, parent_note_id, dt, f"暂未专门处理的消息类型：{msg_type}")
     except Exception as exc:
         app.logger.exception("failed to save %s message: %s", msg_type, exc)
-        # 至少保留一条文本记录，方便排查媒体下载或上传失败。
-        save_fallback_message(message, parent_note_id, dt, str(exc))
+
+        # 如果目标父节点已经成功解析，则至少尝试保留一条文本记录，
+        # 方便排查媒体下载或上传失败。
+        if "parent_note_id" in locals():
+            try:
+                save_fallback_message(message, parent_note_id, dt, str(exc))
+            except Exception:
+                app.logger.exception("failed to save fallback message")
 
 
 def passive_text_reply(message: dict, content: str, encrypted: bool = False,
@@ -471,37 +528,6 @@ def passive_text_reply(message: dict, content: str, encrypted: bool = False,
 def create_trilium_note(message: dict) -> None:
     """兼容旧函数名。"""
     save_wechat_message(message)
-
-    title = f"微信消息 - {dt.strftime('%Y-%m-%d %H:%M:%S UTC')}"
-
-    if msg_type == "text":
-        content_text = message.get("Content", "")
-    else:
-        content_text = f"暂未专门处理的消息类型：{msg_type}\n原始字段：{message}"
-
-    content_html = f"""
-<h1>{html.escape(title)}</h1>
-<ul>
-  <li><strong>FromUserName:</strong> {html.escape(from_user)}</li>
-  <li><strong>MsgType:</strong> {html.escape(msg_type)}</li>
-  <li><strong>CreateTime:</strong> {html.escape(create_time)}</li>
-</ul>
-<pre>{html.escape(content_text)}</pre>
-""".strip()
-
-    url = f"{TRILIUM_BASE_URL}/etapi/create-note"
-    payload = {
-        "parentNoteId": TRILIUM_PARENT_NOTE_ID,
-        "title": title,
-        "type": "text",
-        "content": content_html,
-    }
-    headers = {
-        "Authorization": TRILIUM_ETAPI_TOKEN,
-        "Content-Type": "application/json",
-    }
-    resp = requests.post(url, json=payload, headers=headers, timeout=10)
-    resp.raise_for_status()
 
 
 @app.get("/")
