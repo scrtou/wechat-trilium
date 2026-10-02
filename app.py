@@ -684,4 +684,8 @@ def healthz():
 
 
 if __name__ == "__main__":
-    app.run(host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "8000")))
+    bind_host = os.getenv("BIND_HOST") or os.getenv("HOST", "0.0.0.0")
+    app.run(
+        host=bind_host,
+        port=int(os.getenv("PORT", "8000")),
+    )
