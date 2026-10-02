@@ -201,9 +201,17 @@ validate_config() {
     err "TRILIUM_ETAPI_TOKEN 不能为空或默认值"
     exit 1
   fi
-  if [[ -z "${TRILIUM_PARENT_NOTE_ID:-}" ]]; then
-    err "TRILIUM_PARENT_NOTE_ID 不能为空"
-    exit 1
+  case "${TRILIUM_TARGET_MODE:-journal}" in
+    note|journal)
+        ;;
+    *)
+        err "TRILIUM_TARGET_MODE 必须是 note 或 journal"
+        exit 1
+        ;;
+  esac
+  if [[ "${TRILIUM_TARGET_MODE:-journal}" == "note" && -z "${TRILIUM_PARENT_NOTE_ID:-}" ]]; then
+      err "TRILIUM_TARGET_MODE=note 时 TRILIUM_PARENT_NOTE_ID 不能为空"
+      exit 1
   fi
 }
 
